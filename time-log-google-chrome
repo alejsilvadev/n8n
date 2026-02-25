@@ -1,0 +1,372 @@
+{
+  "name": "Time Logger — Teamwork + Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "time-logger",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6e861865-440b-4d58-abeb-5264e828306f",
+      "name": "Receive Tab Session",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -864,
+        48
+      ],
+      "webhookId": "time-logger"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "23167878-5e17-450f-9955-d6166e5655ba",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n//  NODE: Validate & Enrich Incoming Session\n// ─────────────────────────────────────────────────────────\n// This node cleans up and standardises the payload from\n// the Chrome extension before writing to Google Sheets.\n\nconst body = $input.first().json.body ?? $input.first().json;\n\n// Bail early if this isn't a tab_session event\nif (body.event !== 'tab_session') {\n  return []; // stop processing\n}\n\n// Round seconds to nearest second\nconst durationSec = Math.round(Number(body.duration_seconds) || 0);\n\n// Format duration as HH:MM:SS for readability in Sheets\nfunction toHHMMSS(seconds) {\n  const h = Math.floor(seconds / 3600);\n  const m = Math.floor((seconds % 3600) / 60);\n  const s = seconds % 60;\n  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');\n}\n\n// Derive a friendly page category\nfunction categorise(hostname, isTeamworkTask) {\n  if (isTeamworkTask) return 'Teamwork Task';\n  if (/mail\\.google|outlook\\.com|gmail/i.test(hostname)) return 'Email';\n  if (/github\\.com|gitlab\\.com/i.test(hostname)) return 'Code';\n  if (/slack\\.com|teams\\.microsoft|discord\\.com/i.test(hostname)) return 'Chat';\n  if (/stackoverflow\\.com|stackexchange\\.com/i.test(hostname)) return 'Research';\n  if (/docs\\.google|notion\\.so|confluence/i.test(hostname)) return 'Docs';\n  if (/youtube\\.com|vimeo\\.com/i.test(hostname)) return 'Video';\n  if (/teamwork\\.com/i.test(hostname)) return 'Teamwork (other)';\n  return 'Web';\n}\n\nconst hostname       = body.hostname || '';\nconst isTeamworkTask = body.is_teamwork_task === true;\nconst taskId         = body.teamwork_task_id || '';\nconst category       = categorise(hostname, isTeamworkTask);\n\nreturn [{\n  json: {\n    // Raw fields from extension\n    event:              body.event,\n    url:                body.url || '',\n    title:              (body.title || '').slice(0, 200),  // cap length\n    hostname,\n    is_teamwork_task:   isTeamworkTask,\n    teamwork_task_id:   taskId,\n    start_time:         body.start_time || new Date().toISOString(),\n    end_time:           body.end_time   || new Date().toISOString(),\n    duration_seconds:   durationSec,\n    duration_hms:       toHHMMSS(durationSec),\n    reason:             body.reason || '',\n    // Enriched fields\n    category,\n    logged_at:          new Date().toISOString(),\n    date:               new Date(body.start_time || Date.now()).toISOString().slice(0, 10),\n  }\n}];\n"
+      },
+      "id": "9850f4fc-d402-4a45-8026-f5b8f5791f41",
+      "name": "Validate & Enrich Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Raw Sessions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "Start Time": "={{ $json.start_time }}",
+            "End Time": "={{ $json.end_time }}",
+            "Duration (seconds)": "={{ $json.duration_seconds }}",
+            "Duration (HH:MM:SS)": "={{ $json.duration_hms }}",
+            "Title": "={{ $json.title }}",
+            "URL": "={{ $json.url }}",
+            "Hostname": "={{ $json.hostname }}",
+            "Category": "={{ $json.category }}",
+            "Is Teamwork Task": "={{ $json.is_teamwork_task }}",
+            "Teamwork Task ID": "={{ $json.teamwork_task_id }}",
+            "Trigger Reason": "={{ $json.reason }}",
+            "Logged At": "={{ $json.logged_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "f1abcbb3-03ed-469e-8e53-10be804ac4f4",
+      "name": "Log to Raw Sessions Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -400,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Raw Sessions"
+        },
+        "options": {}
+      },
+      "id": "6d1f4e46-1ec9-4b89-9c95-0804f48cbcbf",
+      "name": "Read Raw Sessions",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -160,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n//  NODE: Calculate Task Time Totals\n// ─────────────────────────────────────────────────────────\n//\n//  LOGIC:\n//  Walk through every row in Raw Sessions in chronological order.\n//  Each time we hit a Teamwork Task URL, it becomes the \"active task\".\n//  Every non-task session that follows is attributed to that active task.\n//  We sum up total seconds per task, and also track the sessions within.\n//\n//  Result: one summary row per unique Teamwork Task ID.\n// ─────────────────────────────────────────────────────────\n\nconst allRows = $input.all().map(item => item.json);\n\n// Build a map: taskId → { title, url, totalSeconds, sessionCount, firstSeen, lastSeen, sessions[] }\nconst taskMap = {};\n\nlet activeTaskId    = null;\nlet activeTaskTitle = null;\nlet activeTaskUrl   = null;\n\nfunction toHHMMSS(seconds) {\n  const h = Math.floor(seconds / 3600);\n  const m = Math.floor((seconds % 3600) / 60);\n  const s = seconds % 60;\n  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');\n}\n\n// Sort rows by start time ascending so we process them in order\nconst sorted = [...allRows].sort((a, b) => {\n  return new Date(a['Start Time'] || 0) - new Date(b['Start Time'] || 0);\n});\n\nfor (const row of sorted) {\n  const isTask   = String(row['Is Teamwork Task']).toLowerCase() === 'true';\n  const taskId   = String(row['Teamwork Task ID'] || '').trim();\n  const duration = parseInt(row['Duration (seconds)'] || '0', 10);\n  const startTime = row['Start Time'] || '';\n\n  if (isTask && taskId) {\n    // This row IS a Teamwork task — it becomes the new active task\n    activeTaskId    = taskId;\n    activeTaskTitle = row['Title'] || `Task #${taskId}`;\n    activeTaskUrl   = row['URL'] || '';\n\n    // Ensure the task entry exists in our map\n    if (!taskMap[activeTaskId]) {\n      taskMap[activeTaskId] = {\n        task_id:          activeTaskId,\n        task_title:       activeTaskTitle,\n        task_url:         activeTaskUrl,\n        total_seconds:    0,\n        session_count:    0,\n        first_seen:       startTime,\n        last_seen:        startTime,\n        attributed_urls:  [],\n      };\n    }\n\n    // The time spent on the task page itself counts too\n    taskMap[activeTaskId].total_seconds += duration;\n    taskMap[activeTaskId].session_count += 1;\n    taskMap[activeTaskId].last_seen = startTime;\n\n  } else if (activeTaskId) {\n    // Regular web session — attribute to the current active Teamwork task\n    if (!taskMap[activeTaskId]) {\n      taskMap[activeTaskId] = {\n        task_id:          activeTaskId,\n        task_title:       activeTaskTitle,\n        task_url:         activeTaskUrl,\n        total_seconds:    0,\n        session_count:    0,\n        first_seen:       startTime,\n        last_seen:        startTime,\n        attributed_urls:  [],\n      };\n    }\n\n    taskMap[activeTaskId].total_seconds += duration;\n    taskMap[activeTaskId].session_count += 1;\n    taskMap[activeTaskId].last_seen = startTime;\n\n    // Keep a deduplicated list of attributed hostnames\n    const hostname = row['Hostname'] || '';\n    if (hostname && !taskMap[activeTaskId].attributed_urls.includes(hostname)) {\n      taskMap[activeTaskId].attributed_urls.push(hostname);\n    }\n  }\n  // If activeTaskId is null, we haven't visited a Teamwork task yet — skip\n}\n\n// Convert map to output rows for Google Sheets upsert\nconst output = Object.values(taskMap).map(t => ({\n  'Task ID':               t.task_id,\n  'Task Title':            t.task_title,\n  'Task URL':              t.task_url,\n  'Total Seconds':         t.total_seconds,\n  'Total Time (HH:MM:SS)': toHHMMSS(t.total_seconds),\n  'Total Hours':           (t.total_seconds / 3600).toFixed(4),\n  'Session Count':         t.session_count,\n  'First Seen':            t.first_seen,\n  'Last Seen':             t.last_seen,\n  'Attributed Sites':      t.attributed_urls.slice(0, 20).join(', '),\n  'Last Updated':          new Date().toISOString(),\n}));\n\nreturn output.map(row => ({ json: row }));\n"
+      },
+      "id": "eb0fd3d0-94c1-4128-9e49-05bc67a37be6",
+      "name": "Calculate Task Time Totals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Task Summary"
+        }
+      },
+      "id": "460f5011-3992-4e8e-b353-4776cdd8f465",
+      "name": "Clear Task Summary Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        320,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Task Summary"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Task ID": "={{ $json['Task ID'] }}",
+            "Task Title": "={{ $json['Task Title'] }}",
+            "Task URL": "={{ $json['Task URL'] }}",
+            "Total Seconds": "={{ $json['Total Seconds'] }}",
+            "Total Time (HH:MM:SS)": "={{ $json['Total Time (HH:MM:SS)'] }}",
+            "Total Hours": "={{ $json['Total Hours'] }}",
+            "Session Count": "={{ $json['Session Count'] }}",
+            "First Seen": "={{ $json['First Seen'] }}",
+            "Last Seen": "={{ $json['Last Seen'] }}",
+            "Attributed Sites": "={{ $json['Attributed Sites'] }}",
+            "Last Updated": "={{ $json['Last Updated'] }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "985f7717-b8dc-4a6a-86b6-68a16fb4910b",
+      "name": "Write Task Summary Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        560,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond_is_task",
+              "leftValue": "={{ $json.is_teamwork_task }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "469940ab-a666-4284-897b-a6e227750a90",
+      "name": "Is Teamwork Task?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Task Summary"
+        },
+        "options": {}
+      },
+      "id": "289aa924-0692-4c78-a649-aca710cc8eca",
+      "name": "Read Current Task Details",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -160,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────\n//  NODE: Check if this task is new (for Slack/notification)\n// ─────────────────────────────────────────────────────────\n// Compares the incoming Teamwork Task ID against existing\n// Task Summary rows to see if we've seen this task before.\n// Output is used for optional Slack notification node.\n\nconst incomingSession = $('Validate & Enrich Session').first().json;\nconst existingTasks   = $input.all().map(i => i.json);\n\nconst taskId    = incomingSession.teamwork_task_id;\nconst taskTitle = incomingSession.title;\n\nconst existing = existingTasks.find(r => String(r['Task ID']) === String(taskId));\n\nreturn [{\n  json: {\n    task_id:          taskId,\n    task_title:       taskTitle,\n    task_url:         incomingSession.url,\n    is_new_task:      !existing,\n    previous_seconds: existing ? parseInt(existing['Total Seconds'] || '0', 10) : 0,\n    previous_hms:     existing ? existing['Total Time (HH:MM:SS)'] || '00:00:00' : '00:00:00',\n  }\n}];\n"
+      },
+      "id": "3595a309-d69f-42b3-af07-eb4f377031f5",
+      "name": "Get Task Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        -112
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Receive Tab Session": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Validate & Enrich Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Enrich Session": {
+      "main": [
+        [
+          {
+            "node": "Log to Raw Sessions Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Teamwork Task?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Teamwork Task?": {
+      "main": [
+        [
+          {
+            "node": "Read Current Task Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Current Task Details": {
+      "main": [
+        [
+          {
+            "node": "Get Task Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Raw Sessions Sheet": {
+      "main": [
+        [
+          {
+            "node": "Read Raw Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Raw Sessions": {
+      "main": [
+        [
+          {
+            "node": "Calculate Task Time Totals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Task Time Totals": {
+      "main": [
+        [
+          {
+            "node": "Clear Task Summary Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Task Summary Sheet": {
+      "main": [
+        [
+          {
+            "node": "Write Task Summary Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "6304cb7e-484f-4934-95bf-948cab5d440a",
+  "meta": {
+    "instanceId": "0c4843f6049683a35592f2cdd2db76e6af71d05757e9c6d2ea79da299b51ecb0"
+  },
+  "id": "Vq5ntM5rDTxuyyCv",
+  "tags": []
+}
