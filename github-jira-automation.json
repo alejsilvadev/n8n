@@ -1,0 +1,214 @@
+{
+  "name": "GitHub Issues → Jira Tickets (Auto Sync)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-issue-webhook",
+        "options": {}
+      },
+      "id": "dd0b4c29-e198-4508-ba0e-29776c055add",
+      "name": "GitHub Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1072,
+        -48
+      ],
+      "webhookId": "e6a02bca-1e86-470c-bce3-585850098ac2",
+      "notes": "SETUP REQUIRED: This node listens for incoming webhook events from GitHub.\n\nTo connect it:\n1. Copy the webhook URL this node generates (shown after you activate the workflow).\n2. Go to your GitHub repo → Settings → Webhooks → Add webhook.\n3. Paste the URL into 'Payload URL'.\n4. Set Content type to 'application/json'.\n5. Under 'Which events?', select 'Issues' only.\n6. Save the webhook.\n\nNow every time a GitHub issue is opened, edited, or closed, GitHub will send data here instantly."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.action }}",
+              "value2": "opened"
+            }
+          ]
+        }
+      },
+      "id": "23b3a873-525d-4d4e-b38a-b7a60e900207",
+      "name": "Filter: Only 'Opened' Issues",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -832,
+        -48
+      ],
+      "notes": "GitHub sends webhook events for many issue actions: opened, closed, edited, labeled, assigned, etc.\n\nThis filter ensures we ONLY proceed when a brand new issue is opened — we don't want to create a duplicate Jira ticket every time someone edits an issue title.\n\nIf the action is 'opened' → continue to the next step.\nIf the action is anything else → the workflow stops here (no Jira ticket created)."
+    },
+    {
+      "parameters": {
+        "functionCode": "// ─────────────────────────────────────────────────────────────\n// STEP: Extract & Enrich Issue Data\n// ─────────────────────────────────────────────────────────────\n// This node reads the raw GitHub webhook payload and pulls out\n// all the fields we need, then makes smart decisions about\n// ticket type and priority based on the issue's labels.\n// ─────────────────────────────────────────────────────────────\n\nconst issue = $json.body.issue;\nconst repo = $json.body.repository;\n\n// --- Pull core fields from the GitHub issue ---\nconst title = issue.title;\nconst body = issue.body || 'No description provided.';\nconst issueUrl = issue.html_url;\nconst issueNumber = issue.number;\nconst reporterGitHub = issue.user.login;\nconst labels = issue.labels.map(l => l.name.toLowerCase());\n\n// ─────────────────────────────────────────────────────────────\n// LABEL → JIRA TICKET TYPE MAPPING\n// Change these to match your own GitHub label conventions.\n// Jira issue types: 'Bug', 'Story', 'Task', 'Epic'\n// ─────────────────────────────────────────────────────────────\nlet jiraIssueType = 'Task'; // default\nif (labels.includes('bug') || labels.includes('defect')) {\n  jiraIssueType = 'Bug';\n} else if (labels.includes('feature') || labels.includes('enhancement') || labels.includes('story')) {\n  jiraIssueType = 'Story';\n} else if (labels.includes('epic')) {\n  jiraIssueType = 'Epic';\n}\n\n// ─────────────────────────────────────────────────────────────\n// LABEL → JIRA PRIORITY MAPPING\n// Jira priorities: 'Highest', 'High', 'Medium', 'Low', 'Lowest'\n// ─────────────────────────────────────────────────────────────\nlet jiraPriority = 'Medium'; // default\nif (labels.includes('critical') || labels.includes('urgent') || labels.includes('p0')) {\n  jiraPriority = 'Highest';\n} else if (labels.includes('high') || labels.includes('p1')) {\n  jiraPriority = 'High';\n} else if (labels.includes('low') || labels.includes('p3')) {\n  jiraPriority = 'Low';\n}\n\n// ─────────────────────────────────────────────────────────────\n// SKIP FLAG — labels that should NOT create a Jira ticket\n// e.g. questions, documentation, duplicate reports\n// ─────────────────────────────────────────────────────────────\nconst skipLabels = ['question', 'duplicate', 'wontfix', 'invalid', 'docs'];\nconst shouldSkip = labels.some(l => skipLabels.includes(l));\n\n// Build a clean description for the Jira ticket\nconst jiraDescription = [\n  `*Reported by:* ${reporterGitHub}`,\n  `*GitHub Issue:* [#${issueNumber} - ${title}|${issueUrl}]`,\n  `*Repository:* ${repo.full_name}`,\n  '',\n  '---',\n  '',\n  '*Original Description:*',\n  body\n].join('\\n');\n\nreturn [{\n  json: {\n    title,\n    jiraDescription,\n    jiraIssueType,\n    jiraPriority,\n    issueUrl,\n    issueNumber,\n    reporterGitHub,\n    repoFullName: repo.full_name,\n    repoOwner: repo.owner.login,\n    repoName: repo.name,\n    labels,\n    shouldSkip\n  }\n}];"
+      },
+      "id": "c9de10fc-caf2-4836-90f1-865cc48d88c2",
+      "name": "Extract & Map Issue Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -592,
+        -48
+      ],
+      "notes": "This is the 'brain' of the workflow. It reads the GitHub issue payload and figures out how to represent it in Jira.\n\nKey decisions made here:\n\n1. TICKET TYPE — Based on GitHub labels:\n   - 'bug' or 'defect' → Jira Bug\n   - 'feature', 'enhancement', 'story' → Jira Story\n   - 'epic' → Jira Epic\n   - Anything else → Jira Task (default)\n\n2. PRIORITY — Based on GitHub labels:\n   - 'critical', 'urgent', 'p0' → Highest\n   - 'high', 'p1' → High\n   - 'low', 'p3' → Low\n   - Default → Medium\n\n3. SKIP FLAG — Some issues shouldn't become Jira tickets:\n   - 'question', 'duplicate', 'wontfix', 'invalid', 'docs'\n   - If any of these labels exist, shouldSkip = true\n\n4. DESCRIPTION — A clean Jira-formatted description is built\n   that includes the reporter's name, a clickable link back\n   to the original GitHub issue, and the full issue body.\n\nCUSTOMIZATION: Edit the label arrays in this code block\nto match whatever labels your team actually uses on GitHub."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldSkip }}"
+            }
+          ]
+        }
+      },
+      "id": "d46b9ad6-5e5d-497c-af99-6557b8944e3d",
+      "name": "Filter: Skip Unwanted Labels",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -352,
+        -48
+      ],
+      "notes": "A second filter that checks the 'shouldSkip' flag set in the previous step.\n\nIf the issue has labels like 'question', 'duplicate', 'wontfix', 'invalid', or 'docs', we don't want to pollute Jira with tickets that aren't real work items.\n\nIf shouldSkip = false → proceed to create the Jira ticket.\nIf shouldSkip = true → the workflow stops here quietly.\n\nYou can add or remove labels from the skip list by editing the previous 'Extract & Map' node."
+    },
+    {
+      "parameters": {
+        "project": "YOUR_JIRA_PROJECT_KEY",
+        "issueType": "={{ $json.jiraIssueType }}",
+        "summary": "={{ $json.title }}",
+        "additionalFields": {
+          "description": "={{ $json.jiraDescription }}",
+          "labels": [
+            "github-sync"
+          ],
+          "priority": {
+            "name": "={{ $json.jiraPriority }}"
+          }
+        }
+      },
+      "id": "4abe9b5d-540e-4e26-a172-06ee1a63547e",
+      "name": "Create Jira Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        -112,
+        -128
+      ],
+      "notes": "SETUP REQUIRED: This node creates the actual Jira ticket.\n\nBefore this will work, you need to:\n1. Add your Jira credentials in n8n:\n   - Go to Credentials → New → Jira Software Cloud API\n   - Enter your Jira subdomain (e.g. 'mycompany' from mycompany.atlassian.net)\n   - Enter your Atlassian account email\n   - Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens\n   - Paste the token in\n\n2. Set your PROJECT KEY:\n   - Replace 'YOUR_JIRA_PROJECT_KEY' with your actual key\n   - Find this in Jira: go to your project → look at the URL or ticket IDs\n   - e.g. if tickets are named 'DEV-123', your key is 'DEV'\n\nThis node will automatically populate:\n- Title (from GitHub issue title)\n- Description (formatted with reporter, link, and body)\n- Issue Type (Bug / Story / Task / Epic based on labels)\n- Priority (Highest / High / Medium / Low based on labels)\n- A 'github-sync' label so you can filter these in Jira\n\nThe Jira ticket key (e.g. DEV-456) is passed to the next step."
+    },
+    {
+      "parameters": {
+        "operation": "createComment",
+        "owner": "={{ $('Extract & Map Issue Data').item.json.repoOwner }}",
+        "repository": "={{ $('Extract & Map Issue Data').item.json.repoName }}",
+        "issueNumber": "={{ $('Extract & Map Issue Data').item.json.issueNumber }}",
+        "body": "=🤖 **This issue has been automatically synced to Jira.**\n\n📋 **Jira Ticket:** [{{ $json.key }}](https://YOUR_JIRA_SUBDOMAIN.atlassian.net/browse/{{ $json.key }})\n**Type:** {{ $('Extract & Map Issue Data').item.json.jiraIssueType }}\n**Priority:** {{ $('Extract & Map Issue Data').item.json.jiraPriority }}\n\n_Any updates to the Jira ticket will be reflected here. Please track progress on Jira._"
+      },
+      "id": "23b0e571-7af2-4ab4-a714-de25fd163988",
+      "name": "Post GitHub Comment with Jira Link",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [
+        128,
+        -128
+      ],
+      "webhookId": "b3f530eb-990d-4a08-beff-87b064c351d9",
+      "notes": "SETUP REQUIRED: This node posts a comment back on the original GitHub issue to confirm it's been synced.\n\nThe comment will include:\n- A clickable link to the Jira ticket that was just created\n- The ticket type and priority\n- A note to track progress in Jira\n\nThis is useful because:\n- The person who filed the GitHub issue knows it's been acknowledged\n- There's a permanent paper trail linking the two systems\n- Anyone browsing GitHub issues can see their Jira status\n\nBefore this works:\n1. Add GitHub credentials in n8n:\n   - Go to Credentials → New → GitHub API\n   - Generate a Personal Access Token at: https://github.com/settings/tokens\n   - Give it 'repo' scope permissions\n   - Paste it into n8n\n\n2. Update the Jira URL:\n   - Replace 'YOUR_JIRA_SUBDOMAIN' with your actual Jira subdomain\n   - e.g. if your Jira is at 'acme.atlassian.net', use 'acme'"
+    },
+    {
+      "parameters": {
+        "channel": "YOUR_SLACK_CHANNEL_ID",
+        "text": "=🐛 *New GitHub Issue → Jira Ticket Created*\n\n*GitHub Issue:* <{{ $('Extract & Map Issue Data').item.json.issueUrl }}|#{{ $('Extract & Map Issue Data').item.json.issueNumber }} - {{ $('Extract & Map Issue Data').item.json.title }}>\n*Jira Ticket:* <https://YOUR_JIRA_SUBDOMAIN.atlassian.net/browse/{{ $('Create Jira Ticket').item.json.key }}|{{ $('Create Jira Ticket').item.json.key }}>\n*Type:* {{ $('Extract & Map Issue Data').item.json.jiraIssueType }} | *Priority:* {{ $('Extract & Map Issue Data').item.json.jiraPriority }}\n*Repo:* {{ $('Extract & Map Issue Data').item.json.repoFullName }}\n*Reported by:* {{ $('Extract & Map Issue Data').item.json.reporterGitHub }}",
+        "otherOptions": {},
+        "attachments": []
+      },
+      "id": "25667309-6c7b-4d9c-8f90-5e868977013f",
+      "name": "Notify Slack (Optional)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        128,
+        80
+      ],
+      "notes": "OPTIONAL: This node sends a Slack notification to your dev channel whenever a new issue is synced to Jira.\n\nThe message includes:\n- Clickable link to the GitHub issue\n- Clickable link to the new Jira ticket\n- Issue type, priority, repo, and reporter\n\nTo enable this:\n1. Add Slack credentials in n8n:\n   - Go to Credentials → New → Slack API\n   - Create a Slack App at https://api.slack.com/apps with 'chat:write' scope\n   - Copy the Bot OAuth Token\n\n2. Replace 'YOUR_SLACK_CHANNEL_ID' with your channel ID:\n   - Right-click a Slack channel → View channel details → Copy channel ID\n   - It looks like: C04ABC12345\n\n3. Replace 'YOUR_JIRA_SUBDOMAIN' with your actual subdomain\n\nTO DISABLE: Simply delete this node or disconnect it from the workflow.\nThe rest of the automation will still work without it."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "GitHub Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Filter: Only 'Opened' Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: Only 'Opened' Issues": {
+      "main": [
+        [
+          {
+            "node": "Extract & Map Issue Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Map Issue Data": {
+      "main": [
+        [
+          {
+            "node": "Filter: Skip Unwanted Labels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter: Skip Unwanted Labels": {
+      "main": [
+        [
+          {
+            "node": "Create Jira Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Jira Ticket": {
+      "main": [
+        [
+          {
+            "node": "Post GitHub Comment with Jira Link",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Slack (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "f8b3d576-5c57-4d6a-b3f6-29cea718c2f0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0c4843f6049683a35592f2cdd2db76e6af71d05757e9c6d2ea79da299b51ecb0"
+  },
+  "id": "bbIaDEJLvnz08RAy",
+  "tags": []
+}
