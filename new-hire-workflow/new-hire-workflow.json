@@ -1,0 +1,350 @@
+{
+  "name": "New Hire Provisioning (GitHub, Slack, Jira, Email)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-hire-webhook",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      },
+      "id": "node_1",
+      "name": "HR System Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 400],
+      "notes": "SETUP REQUIRED: This node receives a POST request from your HR system whenever a new employee record is created.\n\nCommon HR systems that support outgoing webhooks:\n  - BambooHR: Admin -> Webhooks -> Add Webhook\n  - HiBob: Integrations -> Webhooks\n  - Workday: requires a custom integration or middleware\n  - Rippling: Automations -> Trigger on employee added\n  - If your HR system does not support webhooks, see the alternative trigger note below.\n\nAlternative trigger option:\nIf your HR system cannot send webhooks, you can replace this node with an n8n Schedule Trigger that polls a Google Sheet or Airtable base where HR staff manually add new employees. Many small companies use this approach.\n\nExpected payload from your HR system (adjust field names in the next node to match your actual payload):\n{\n  'first_name': 'Jane',\n  'last_name': 'Doe',\n  'email': 'jane.doe@yourcompany.com',\n  'role': 'developer',\n  'department': 'engineering',\n  'start_date': '2026-03-01',\n  'github_username': 'janedoe',\n  'manager_email': 'manager@yourcompany.com'\n}\n\nOnce the workflow is active, copy the webhook URL shown here and paste it into your HR system's webhook settings."
+    },
+    {
+      "parameters": {
+        "functionCode": "// ─────────────────────────────────────────────────────────────\n// STEP: Extract and Validate New Hire Data\n// ─────────────────────────────────────────────────────────────\n// Reads the incoming HR payload, normalises all field values,\n// determines which tools to provision based on department/role,\n// and flags any missing required fields before anything runs.\n// ─────────────────────────────────────────────────────────────\n\nconst payload = $json.body;\n\n// Extract fields - update these keys to match your HR system's field names\nconst firstName    = payload.first_name   || payload.firstName   || '';\nconst lastName     = payload.last_name    || payload.lastName    || '';\nconst email        = payload.email        || '';\nconst role         = (payload.role        || payload.job_title   || 'team member').toLowerCase();\nconst department   = (payload.department  || 'general').toLowerCase();\nconst startDate    = payload.start_date   || payload.startDate   || 'Not specified';\nconst githubUser   = payload.github_username || payload.githubUsername || '';\nconst managerEmail = payload.manager_email   || payload.managerEmail   || '';\n\n// Build full name and a sanitised display name for Slack\nconst fullName     = `${firstName} ${lastName}`.trim();\nconst slackDisplay = fullName;\n\n// ─────────────────────────────────────────────────────────────\n// VALIDATION\n// Stop the workflow early if critical fields are missing.\n// ─────────────────────────────────────────────────────────────\nconst missingFields = [];\nif (!firstName)  missingFields.push('first_name');\nif (!lastName)   missingFields.push('last_name');\nif (!email)      missingFields.push('email');\n\nif (missingFields.length > 0) {\n  throw new Error(`New hire record is missing required fields: ${missingFields.join(', ')}. Provisioning halted.`);\n}\n\n// ─────────────────────────────────────────────────────────────\n// ROLE-BASED PROVISIONING FLAGS\n// Decide which tools this person actually needs based on\n// their department and role. Adjust logic to suit your company.\n// ─────────────────────────────────────────────────────────────\nconst isDeveloper = ['engineering', 'development', 'dev', 'backend', 'frontend', 'fullstack', 'devops', 'qa'].some(d => department.includes(d)) ||\n                   ['developer', 'engineer', 'dev', 'swe', 'sre', 'devops', 'qa'].some(r => role.includes(r));\n\nconst isDesigner  = ['design', 'ux', 'ui', 'product design'].some(d => department.includes(d)) ||\n                   ['designer', 'ux', 'ui'].some(r => role.includes(r));\n\n// GitHub access: developers and designers typically need it\nconst needsGitHub = isDeveloper || isDesigner;\n\n// Jira access: developers, designers, and project managers\nconst needsJira   = isDeveloper || isDesigner ||\n                   ['product', 'project', 'management', 'pm'].some(d => department.includes(d));\n\n// Everyone gets Slack and email\nconst needsSlack  = true;\nconst needsEmail  = true;\n\n// ─────────────────────────────────────────────────────────────\n// JIRA ROLE MAPPING\n// Maps the employee role to a Jira project role.\n// Adjust to match the roles configured in your Jira project.\n// ─────────────────────────────────────────────────────────────\nlet jiraRole = 'Developer'; // default\nif (role.includes('lead') || role.includes('senior') || role.includes('manager')) {\n  jiraRole = 'Developer'; // or 'Team Lead' if you have that role in Jira\n} else if (role.includes('qa') || role.includes('tester')) {\n  jiraRole = 'Developer';\n} else if (role.includes('designer')) {\n  jiraRole = 'Developer';\n}\n\n// ─────────────────────────────────────────────────────────────\n// SLACK CHANNELS TO ADD NEW HIRE TO\n// Replace channel IDs with your real ones.\n// Everyone gets the first two, developers get extras.\n// You can find channel IDs in Slack: right-click channel -> View details.\n// ─────────────────────────────────────────────────────────────\nconst baseChannels = [\n  'CHANNEL_ID_GENERAL',    // #general\n  'CHANNEL_ID_ANNOUNCEMENTS' // #announcements\n];\n\nconst devChannels = [\n  'CHANNEL_ID_ENGINEERING', // #engineering\n  'CHANNEL_ID_DEPLOYMENTS', // #deployments\n  'CHANNEL_ID_CODE_REVIEW'  // #code-review\n];\n\nconst slackChannels = isDeveloper\n  ? [...baseChannels, ...devChannels]\n  : baseChannels;\n\nreturn [{\n  json: {\n    firstName,\n    lastName,\n    fullName,\n    email,\n    role,\n    department,\n    startDate,\n    githubUser,\n    managerEmail,\n    slackDisplay,\n    slackChannels,\n    jiraRole,\n    needsGitHub,\n    needsJira,\n    needsSlack,\n    needsEmail,\n    isDeveloper\n  }\n}];"
+      },
+      "id": "node_2",
+      "name": "Extract and Validate Hire Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [480, 400],
+      "notes": "This node does four things:\n\n1. FIELD EXTRACTION\n   Reads the incoming HR payload and maps fields to normalised variable names. If your HR system uses different field names (e.g. 'emp_email' instead of 'email'), update the extraction lines at the top of this node's code.\n\n2. VALIDATION\n   Checks that first name, last name, and email are all present. If any are missing, the workflow throws an error and stops immediately rather than partially provisioning an account.\n\n3. ROLE-BASED FLAGS\n   Determines which tools the new hire actually needs based on their department and role. Developers get GitHub, Jira, and Slack. Non-technical staff still get Slack and a welcome email, but are skipped for GitHub and optionally Jira. Edit the department and role keyword arrays to match your company's terminology.\n\n4. SLACK CHANNEL LIST\n   Builds the list of Slack channel IDs to add the person to. Replace the placeholder channel IDs with your real ones. You can find a channel's ID in Slack by right-clicking it and selecting View channel details."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needsGitHub }}",
+              "operation": "equal",
+              "value2": true
+            },
+            {
+              "value1": "={{ $json.githubUser !== '' }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "node_3",
+      "name": "Check - Needs GitHub and Username Provided",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [720, 240],
+      "notes": "GitHub invitations require the new hire's existing GitHub username. This filter checks two things before proceeding:\n\n1. That the employee's role/department qualifies them for GitHub access (set in the previous node)\n2. That a GitHub username was actually provided in the HR record\n\nIf either condition fails, this branch is skipped. The rest of the workflow (Slack, Jira, email) continues regardless.\n\nIf your company creates GitHub accounts for new hires rather than inviting existing ones, you would replace the GitHub invite node below with a custom HTTP Request node calling the GitHub API directly."
+    },
+    {
+      "parameters": {
+        "resource": "organizationInvite",
+        "operation": "create",
+        "organization": "YOUR_GITHUB_ORG_NAME",
+        "invitee": "={{ $('Extract and Validate Hire Data').item.json.githubUser }}",
+        "role": "direct_member",
+        "teamIds": []
+      },
+      "id": "node_4",
+      "name": "GitHub - Invite to Organisation",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [960, 140],
+      "credentials": {
+        "githubApi": {
+          "name": "GitHub Account"
+        }
+      },
+      "notes": "SETUP REQUIRED: Sends a GitHub organisation invitation to the new hire's existing GitHub account.\n\nBefore this works:\n1. Add GitHub credentials in n8n:\n   Go to Credentials -> New -> GitHub API.\n   Generate a Personal Access Token at github.com/settings/tokens.\n   The token must belong to an organisation owner and needs the 'admin:org' scope to send invitations.\n\n2. Replace YOUR_GITHUB_ORG_NAME with your organisation's GitHub handle.\n   For example, if your org URL is github.com/acme-corp, enter 'acme-corp'.\n\nThe new hire will receive an email from GitHub asking them to accept the invitation. They will not have access until they accept.\n\nOptional: If you want to add them to a specific GitHub team at the same time (e.g. the 'engineering' team), you can add team IDs to the teamIds array. Find team IDs via the GitHub API: GET /orgs/{org}/teams."
+    },
+    {
+      "parameters": {
+        "resource": "users",
+        "operation": "invite",
+        "email": "={{ $('Extract and Validate Hire Data').item.json.email }}",
+        "channelIds": "={{ $('Extract and Validate Hire Data').item.json.slackChannels }}"
+      },
+      "id": "node_5",
+      "name": "Slack - Invite User",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [960, 340],
+      "credentials": {
+        "slackApi": {
+          "name": "Slack Account"
+        }
+      },
+      "notes": "SETUP REQUIRED: Sends a Slack workspace invitation to the new hire's work email address and adds them to the correct channels automatically.\n\nBefore this works:\n1. Add Slack credentials in n8n:\n   Go to Credentials -> New -> Slack API.\n   Create a Slack app at api.slack.com/apps.\n   The app needs the following OAuth scopes: 'users:write', 'channels:manage', 'groups:write'.\n   Copy the Bot OAuth Token into n8n.\n\n2. Update the Slack channel IDs in the 'Extract and Validate Hire Data' node.\n   The channel list is built there and passed through automatically.\n\nNote: Inviting users to a Slack workspace via API requires a paid Slack plan. On the free plan, you can still use this node to post a message to a channel notifying the team, and manually invite the user. If that is your situation, swap this node for a Slack 'Send Message' node instead."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Extract and Validate Hire Data').item.json.needsJira }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node_6",
+      "name": "Check - Needs Jira",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [720, 540],
+      "notes": "Checks whether this employee needs a Jira account based on their role and department.\n\nDevelopers, designers, and project managers are provisioned by default. Staff in unrelated departments (e.g. sales, finance, HR) are skipped here to avoid filling up your Jira user seats on the free or standard plan.\n\nTo change who gets Jira access, edit the 'needsJira' logic in the 'Extract and Validate Hire Data' node."
+    },
+    {
+      "parameters": {
+        "resource": "user",
+        "operation": "create",
+        "email": "={{ $('Extract and Validate Hire Data').item.json.email }}",
+        "displayName": "={{ $('Extract and Validate Hire Data').item.json.fullName }}",
+        "additionalFields": {
+          "products": ["jira-software"]
+        }
+      },
+      "id": "node_7",
+      "name": "Jira - Create User Account",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [960, 540],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "name": "Jira Account"
+        }
+      },
+      "notes": "SETUP REQUIRED: Creates a new Atlassian account for the employee and adds them to your Jira instance.\n\nBefore this works:\n1. Add Jira credentials in n8n:\n   Go to Credentials -> New -> Jira Software Cloud API.\n   Enter your Atlassian subdomain (e.g. 'acme' from acme.atlassian.net).\n   Enter an admin account email and an API token.\n   Generate the token at: id.atlassian.com/manage-profile/security/api-tokens.\n\nNote on Jira user creation:\nJira's API creates the user at the Atlassian organisation level and sends them an invitation email to activate their account. The user will not appear as active in Jira until they accept.\n\nJira's free plan supports up to 10 users. If you are on the free plan and near that limit, this node will fail. Upgrade to the Standard plan for unlimited users.\n\nAfter account creation you may want to add a follow-up node to assign the user to a specific Jira project. See the optional node below."
+    },
+    {
+      "parameters": {
+        "url": "=https://YOUR_JIRA_SUBDOMAIN.atlassian.net/rest/api/3/project/YOUR_JIRA_PROJECT_KEY/role/YOUR_ROLE_ID",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "requestMethod": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "user",
+              "value": "={{ [$json.accountId] }}"
+            }
+          ]
+        }
+      },
+      "id": "node_8",
+      "name": "Jira - Add User to Project (Optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1200, 540],
+      "notes": "OPTIONAL: Adds the newly created Jira user to a specific project with a specific role.\n\nThis uses the Jira REST API directly because n8n's built-in Jira node does not yet expose project role membership as a built-in action.\n\nBefore this works:\n1. Replace YOUR_JIRA_SUBDOMAIN with your subdomain (e.g. acme)\n2. Replace YOUR_JIRA_PROJECT_KEY with your project key (e.g. DEV)\n3. Replace YOUR_ROLE_ID with the numeric role ID from your Jira project.\n   To find role IDs: visit https://YOUR_SUBDOMAIN.atlassian.net/rest/api/3/project/YOUR_KEY/role\n   This will return a JSON list of roles and their IDs.\n4. Set the credential on this node to use Basic Auth with your Jira admin email and API token.\n\nTO DISABLE: Disconnect or delete this node. The Jira account will still be created, the user just will not be added to a specific project automatically."
+    },
+    {
+      "parameters": {
+        "fromEmail": "onboarding@YOUR_COMPANY_DOMAIN.com",
+        "toEmail": "={{ $('Extract and Validate Hire Data').item.json.email }}",
+        "subject": "=Welcome to the team, {{ $('Extract and Validate Hire Data').item.json.firstName }}",
+        "emailType": "html",
+        "message": "=<p>Hi {{ $('Extract and Validate Hire Data').item.json.firstName }},</p>\n\n<p>Welcome to the team. We are excited to have you starting on {{ $('Extract and Validate Hire Data').item.json.startDate }}.</p>\n\n<p>Your accounts have been set up. Here is a summary of what to expect:</p>\n\n<ul>\n  <li><strong>Slack</strong>: You will receive an invitation to join our Slack workspace at {{ $('Extract and Validate Hire Data').item.json.email }}. Once accepted, you will be added to the relevant channels automatically.</li>\n  <li><strong>Jira</strong>: You will receive a separate email from Atlassian to activate your Jira account. This is where we track all development work and project tasks.</li>\n  <li><strong>GitHub</strong>: If applicable, you will receive an invitation to join our GitHub organisation. Accept this to get access to our code repositories.</li>\n</ul>\n\n<p>If you have any questions before your start date, please reach out to your manager at {{ $('Extract and Validate Hire Data').item.json.managerEmail }}.</p>\n\n<p>Looking forward to having you on board.</p>\n\n<p>The {{ $('Extract and Validate Hire Data').item.json.department }} team</p>"
+      },
+      "id": "node_9",
+      "name": "Send Welcome Email to New Hire",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [960, 720],
+      "credentials": {
+        "smtp": {
+          "name": "SMTP Account"
+        }
+      },
+      "notes": "SETUP REQUIRED: Sends a personalised welcome email to the new hire's work email address.\n\nThe email covers:\n  - Their start date\n  - What to expect from each tool invitation\n  - Their manager's contact details for pre-start questions\n\nBefore this works:\n1. Add SMTP credentials in n8n:\n   Go to Credentials -> New -> SMTP.\n   Enter your mail server host, port, and login details.\n\n   Common SMTP settings:\n   Google Workspace: smtp.gmail.com, port 587, use an App Password\n   Microsoft 365: smtp.office365.com, port 587\n   SendGrid: smtp.sendgrid.net, port 587, use your API key as the password\n\n2. Update the fromEmail field:\n   Replace 'onboarding@YOUR_COMPANY_DOMAIN.com' with a real sending address.\n\nCUSTOMISATION:\n   The email body is HTML. You can edit the message directly in this node to match your company tone and add any additional onboarding information (e.g. links to a wiki, a first-day checklist, etc.)."
+    },
+    {
+      "parameters": {
+        "fromEmail": "onboarding@YOUR_COMPANY_DOMAIN.com",
+        "toEmail": "={{ $('Extract and Validate Hire Data').item.json.managerEmail }}",
+        "subject": "=Account provisioning complete for {{ $('Extract and Validate Hire Data').item.json.fullName }}",
+        "emailType": "html",
+        "message": "=<p>Hi,</p>\n\n<p>This is an automated confirmation that accounts have been provisioned for your new team member.</p>\n\n<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;'>\n  <tr><td><strong>Name</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.fullName }}</td></tr>\n  <tr><td><strong>Email</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.email }}</td></tr>\n  <tr><td><strong>Role</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.role }}</td></tr>\n  <tr><td><strong>Department</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.department }}</td></tr>\n  <tr><td><strong>Start Date</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.startDate }}</td></tr>\n  <tr><td><strong>GitHub</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.needsGitHub ? 'Invitation sent' : 'Not required for this role' }}</td></tr>\n  <tr><td><strong>Slack</strong></td><td>Invitation sent</td></tr>\n  <tr><td><strong>Jira</strong></td><td>{{ $('Extract and Validate Hire Data').item.json.needsJira ? 'Account created' : 'Not required for this role' }}</td></tr>\n  <tr><td><strong>Welcome email</strong></td><td>Sent</td></tr>\n</table>\n\n<p>No action is required on your end. This email is for your records.</p>"
+      },
+      "id": "node_10",
+      "name": "Send Manager Confirmation Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [960, 880],
+      "credentials": {
+        "smtp": {
+          "name": "SMTP Account"
+        }
+      },
+      "notes": "Sends a summary confirmation email to the new hire's manager listing everything that was provisioned.\n\nThe email includes a table showing:\n  - The new hire's details (name, role, department, start date)\n  - Which tools were provisioned and their status\n  - A note that no action is required\n\nThis is useful so managers do not have to log into n8n to verify the workflow ran correctly. It also creates an audit trail in their inbox.\n\nThis node uses the same SMTP credentials as the welcome email node. Update the fromEmail field to match the same sending address you used there."
+    },
+    {
+      "parameters": {
+        "channel": "YOUR_ADMIN_SLACK_CHANNEL_ID",
+        "text": "=New hire provisioning complete\n\nName: {{ $('Extract and Validate Hire Data').item.json.fullName }}\nEmail: {{ $('Extract and Validate Hire Data').item.json.email }}\nRole: {{ $('Extract and Validate Hire Data').item.json.role }}\nDepartment: {{ $('Extract and Validate Hire Data').item.json.department }}\nStart Date: {{ $('Extract and Validate Hire Data').item.json.startDate }}\n\nAccounts provisioned:\nGitHub: {{ $('Extract and Validate Hire Data').item.json.needsGitHub ? 'Invitation sent to @' + $('Extract and Validate Hire Data').item.json.githubUser : 'Not required' }}\nSlack: Invitation sent\nJira: {{ $('Extract and Validate Hire Data').item.json.needsJira ? 'Account created' : 'Not required' }}\nWelcome email: Sent to {{ $('Extract and Validate Hire Data').item.json.email }}",
+        "otherOptions": {}
+      },
+      "id": "node_11",
+      "name": "Notify Admin Slack Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [960, 1040],
+      "credentials": {
+        "slackApi": {
+          "name": "Slack Account"
+        }
+      },
+      "notes": "OPTIONAL: Posts a summary to an internal admin or HR Slack channel whenever a new hire is fully provisioned.\n\nThis gives your IT or operations team a real-time log of all provisioning activity without needing to check n8n directly.\n\nBefore this works:\n1. Replace YOUR_ADMIN_SLACK_CHANNEL_ID with the ID of your admin or IT channel.\n   Right-click the channel in Slack -> View channel details -> Copy the ID at the bottom.\n\nTO DISABLE: Disconnect or delete this node. All other steps will continue to run normally."
+    }
+  ],
+  "connections": {
+    "HR System Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract and Validate Hire Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract and Validate Hire Data": {
+      "main": [
+        [
+          {
+            "node": "Check - Needs GitHub and Username Provided",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack - Invite User",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check - Needs Jira",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Welcome Email to New Hire",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Manager Confirmation Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Admin Slack Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check - Needs GitHub and Username Provided": {
+      "main": [
+        [
+          {
+            "node": "GitHub - Invite to Organisation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check - Needs Jira": {
+      "main": [
+        [
+          {
+            "node": "Jira - Create User Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jira - Create User Account": {
+      "main": [
+        [
+          {
+            "node": "Jira - Add User to Project (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": ["onboarding", "provisioning", "hr", "automation"],
+  "_readme": {
+    "title": "New Hire Provisioning Automation",
+    "version": "1.0",
+    "description": "Provisions accounts across GitHub, Slack, Jira, and email when a new employee is added to your HR system.",
+    "workflow_summary": [
+      "1. HR system sends a webhook to n8n when a new employee record is created",
+      "2. Employee data is extracted, validated, and enriched with role-based provisioning flags",
+      "3. GitHub organisation invitation is sent (developers and designers only, if username is provided)",
+      "4. Slack workspace invitation is sent and user is added to relevant channels",
+      "5. Jira account is created (developers, designers, and project managers only)",
+      "6. Optionally the Jira user is added to a specific project with a role",
+      "7. A welcome email is sent to the new hire",
+      "8. A confirmation email is sent to the manager",
+      "9. An admin Slack channel is notified with a full provisioning summary"
+    ],
+    "required_credentials": [
+      "GitHub Personal Access Token (admin:org scope, must be an org owner)",
+      "Slack Bot OAuth Token (users:write, channels:manage, groups:write scopes)",
+      "Jira API Token (admin account)",
+      "SMTP credentials for sending email"
+    ],
+    "required_customization": [
+      "Replace YOUR_GITHUB_ORG_NAME with your GitHub organisation handle",
+      "Replace YOUR_JIRA_SUBDOMAIN with your Atlassian subdomain",
+      "Replace YOUR_JIRA_PROJECT_KEY and YOUR_ROLE_ID in the optional project assignment node",
+      "Replace YOUR_ADMIN_SLACK_CHANNEL_ID with your internal admin channel ID",
+      "Replace Slack channel ID placeholders in the Extract and Validate Hire Data node",
+      "Replace onboarding@YOUR_COMPANY_DOMAIN.com with your real sending address",
+      "Update HR field name mappings in the Extract and Validate node if your system uses different keys"
+    ]
+  }
+}
