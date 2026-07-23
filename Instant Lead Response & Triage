@@ -1,0 +1,829 @@
+{
+  "name": "Instant Lead Response & Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Instant Lead Response & Triage\n\n**Problem it solves:** inbound leads sit in an inbox for hours. Speed-to-lead is the single biggest lever on conversion for SMBs.\n\n**What it does**\n1. Catches any web form / lead-ad submission via webhook\n2. Normalises messy field names into one schema\n3. Checks the Leads sheet so repeat contacts don't get a cold intro\n4. Uses an LLM to score, tag and draft a real reply\n5. Routes: HOT -> Slack + SMS + instant email · WARM -> instant email · SPAM -> logged only\n6. Waits 24h, checks Gmail for a reply, sends one polite nudge if silent\n\n**Setup (15 min)**\n- Create a Google Sheet named `Leads` with headers:\n  `Lead ID | Received At | Name | Email | Phone | Company | Service | Budget | Source | Message | Grade | Score | Urgency | Summary | Next Step | Status`\n- Paste the Sheet ID into both Google Sheets nodes\n- Set credentials on: Google Sheets, OpenAI, Gmail, Slack, Twilio\n- Edit the SYSTEM PROMPT in `AI Qualify Lead` with your business name, services and pricing guardrails\n- Replace `+15550000000` in the Twilio node with the on-call rep's mobile\n- Replace the signature block in both Gmail reply nodes\n- Point your form at the production webhook URL (POST)",
+        "height": 720,
+        "width": 460,
+        "color": 4
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "README",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-820, 60]
+    },
+    {
+      "parameters": {
+        "content": "### Test payload\nPOST this to the webhook to try it:\n```\n{\n  \"first_name\": \"Dana\",\n  \"last_name\": \"Rivera\",\n  \"Email Address\": \"dana@acmedental.com\",\n  \"phone\": \"+19735551234\",\n  \"company\": \"Acme Dental\",\n  \"service\": \"HVAC replacement\",\n  \"budget\": \"$12,000\",\n  \"timeline\": \"next 2 weeks\",\n  \"message\": \"Our rooftop unit failed and the office is 84 degrees. Need a quote ASAP, we have 3 quotes already.\"\n}\n```",
+        "height": 380,
+        "width": 420,
+        "color": 6
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Test Payload",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-820, 800]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-300, 320],
+      "webhookId": "c0ffee00-lead-4000-8000-000000000abc"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Different forms send different field names. Normalise everything into one schema.\nconst raw = $input.first().json;\nconst body = raw.body ?? raw;\n\nconst norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');\nconst entries = Object.entries(body || {});\n\nconst pick = (...keys) => {\n  for (const key of keys) {\n    const want = norm(key);\n    const hit = entries.find(([k, v]) =>\n      norm(k) === want && v !== undefined && v !== null && String(v).trim() !== ''\n    );\n    if (hit) return String(hit[1]).trim();\n  }\n  return '';\n};\n\nconst email = pick('email', 'emailAddress', 'userEmail', 'contactEmail', 'e-mail', 'your email').toLowerCase();\nconst phone = pick('phone', 'phoneNumber', 'mobile', 'tel', 'telephone', 'contact number');\n\nconst fullName =\n  pick('name', 'fullName', 'yourName', 'contactName') ||\n  [pick('firstName', 'fname', 'first'), pick('lastName', 'lname', 'last')].filter(Boolean).join(' ');\n\nconst message = pick(\n  'message', 'comments', 'details', 'description', 'inquiry', 'enquiry',\n  'notes', 'howCanWeHelp', 'projectDetails', 'what do you need'\n);\n\nreturn [{\n  json: {\n    leadId: 'L-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2, 6).toUpperCase(),\n    receivedAt: new Date().toISOString(),\n    fullName: fullName || 'there',\n    firstName: (fullName || '').trim().split(/\\s+/)[0] || 'there',\n    email,\n    phone,\n    company: pick('company', 'companyName', 'business', 'organization', 'organisation'),\n    service: pick('service', 'serviceNeeded', 'interestedIn', 'productType', 'subject', 'topic'),\n    budget: pick('budget', 'estimatedBudget', 'priceRange', 'spend'),\n    timeline: pick('timeline', 'whenDoYouNeedThis', 'startDate', 'timeframe'),\n    message,\n    source: pick('source', 'utm_source', 'referrer', 'leadSource', 'how did you hear about us') || 'website-form',\n    // A lead with no way to contact them is worthless - flag it instead of throwing\n    hasContact: Boolean(email || phone)\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Normalize Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-80, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, leadId: $json.leadId, message: \"Thanks! We've got your request and you'll hear from us in the next few minutes.\" }) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Respond to Form",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [160, 500]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Email",
+              "lookupValue": "={{ $json.email }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Check Existing Lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [160, 240],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Normalize Lead').first().json;\n\nconst rows = $input.all()\n  .map(i => i.json)\n  .filter(r => r && (r.Email || r.email));\n\nconst matches = lead.email\n  ? rows.filter(r => String(r.Email || r.email || '').toLowerCase().trim() === lead.email)\n  : [];\n\nconst last = matches.length ? matches[matches.length - 1] : null;\n\nreturn [{\n  json: {\n    ...lead,\n    isDuplicate: matches.length > 0,\n    priorTouches: matches.length,\n    lastGrade: last ? (last.Grade || '') : '',\n    lastSeen: last ? (last['Received At'] || '') : ''\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Flag Duplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [380, 240]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-not-duplicate",
+              "leftValue": "={{ $json.isDuplicate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "cond-has-contact",
+              "leftValue": "={{ $json.hasContact }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "New & Valid Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [600, 240]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#sales-leads",
+          "mode": "name"
+        },
+        "text": "=:repeat: *Returning contact re-submitted the form*\n*{{ $json.fullName }}* · {{ $json.email }} · {{ $json.phone }}\nThey've now contacted us *{{ $json.priorTouches + 1 }}* times (last graded: {{ $json.lastGrade || 'n/a' }}).\n> {{ $json.message }}\nNo auto-reply sent — someone who knows the history should answer this one.",
+        "otherOptions": {}
+      },
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Slack: Returning Contact",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [860, 440],
+      "webhookId": "c0ffee00-slk1-4000-8000-000000000001"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are the sales-development assistant for [YOUR BUSINESS NAME], a [WHAT YOU DO] serving [YOUR SERVICE AREA]. Your job is to qualify inbound leads and draft the first reply.\n\nReturn ONLY a JSON object, no markdown fences, with exactly these keys:\n{\n  \"is_spam\": boolean,\n  \"score\": integer 0-100,\n  \"urgency\": \"high\" | \"medium\" | \"low\",\n  \"intent\": short phrase describing what they actually want,\n  \"service_line\": which of our services this maps to,\n  \"budget_signal\": \"above target\" | \"on target\" | \"below target\" | \"unknown\",\n  \"summary\": one sentence a busy owner can read in three seconds,\n  \"questions_to_ask\": array of up to 3 qualifying questions,\n  \"next_step\": the single action the rep should take next,\n  \"suggested_reply\": the body of the reply email\n}\n\nScoring guide:\n80-100 = ready to buy. Clear need plus budget, urgency, or a deadline.\n50-79  = real prospect but needs qualifying.\n25-49  = early stage, vague, or price-shopping with no timeline.\n0-24   = spam, job application, vendor pitch, SEO/marketing solicitation, or gibberish.\n\nRules for suggested_reply:\n- 80 to 130 words, plain text\n- NO greeting line, NO subject line, NO sign-off or signature (the template adds those)\n- Reference at least one specific detail from their message so it reads as human\n- Answer their question directly if you can\n- End with ONE clear ask that proposes a specific next step\n- Never invent prices, availability, warranties, certifications, or timelines. If you don't know, say you'll confirm.",
+              "role": "system"
+            },
+            {
+              "content": "=New inbound lead.\n\nName: {{ $json.fullName }}\nEmail: {{ $json.email }}\nPhone: {{ $json.phone || 'not provided' }}\nCompany: {{ $json.company || 'not provided' }}\nService interest: {{ $json.service || 'not stated' }}\nStated budget: {{ $json.budget || 'not stated' }}\nTimeline: {{ $json.timeline || 'not stated' }}\nSource: {{ $json.source }}\n\nTheir message:\n\"\"\"\n{{ $json.message || '(no message body submitted)' }}\n\"\"\"\n\nQualify this lead and draft the reply.",
+              "role": "user"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0.4
+        }
+      },
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "AI Qualify Lead",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [860, 120],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Flag Duplicate').first().json;\n\n// The node output shape varies by model/provider - handle all of them.\nlet ai = $json.message?.content ?? $json.content ?? $json.text ?? $json.output ?? $json;\n\nif (typeof ai === 'string') {\n  const cleaned = ai.replace(/```json/gi, '').replace(/```/g, '').trim();\n  try {\n    ai = JSON.parse(cleaned);\n  } catch (e) {\n    ai = { summary: cleaned.slice(0, 300) };\n  }\n}\nif (typeof ai !== 'object' || ai === null) ai = {};\n\n// If the AI call failed entirely, fall back to WARM so no lead is ever silently dropped.\nconst score = Math.max(0, Math.min(100, Number(ai.score ?? 55)));\nconst isSpam = ai.is_spam === true || ai.is_spam === 'true';\nconst urgency = String(ai.urgency || 'medium').toLowerCase();\n\nlet grade = 'warm';\nif (isSpam || score < 25) grade = 'spam';\nelse if (score >= 70 || urgency === 'high') grade = 'hot';\n\nconst questions = Array.isArray(ai.questions_to_ask) ? ai.questions_to_ask : [];\n\nreturn [{\n  json: {\n    ...lead,\n    score,\n    grade,\n    isSpam,\n    urgency,\n    intent: ai.intent || '',\n    serviceLine: ai.service_line || lead.service || 'General enquiry',\n    budgetSignal: ai.budget_signal || 'unknown',\n    summary: ai.summary || String(lead.message || '').slice(0, 200),\n    nextStep: ai.next_step || 'Call within one business day',\n    questions,\n    questionsText: questions.length ? questions.join('  |  ') : 'n/a',\n    replyBody: ai.suggested_reply || \"Thanks for getting in touch. I've got your details and I'm reviewing them now - I'll come back to you shortly with next steps. If it's urgent, just reply to this email and it comes straight to me.\",\n    status: 'New'\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 120]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead ID": "={{ $json.leadId }}",
+            "Received At": "={{ $json.receivedAt }}",
+            "Name": "={{ $json.fullName }}",
+            "Email": "={{ $json.email }}",
+            "Phone": "={{ $json.phone }}",
+            "Company": "={{ $json.company }}",
+            "Service": "={{ $json.serviceLine }}",
+            "Budget": "={{ $json.budget }}",
+            "Source": "={{ $json.source }}",
+            "Message": "={{ $json.message }}",
+            "Grade": "={{ $json.grade }}",
+            "Score": "={{ $json.score }}",
+            "Urgency": "={{ $json.urgency }}",
+            "Summary": "={{ $json.summary }}",
+            "Next Step": "={{ $json.nextStep }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Log Lead to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1300, 120],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "route-hot",
+                    "leftValue": "={{ $json.grade }}",
+                    "rightValue": "hot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Hot"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "route-warm",
+                    "leftValue": "={{ $json.grade }}",
+                    "rightValue": "warm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Warm"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "route-spam",
+                    "leftValue": "={{ $json.grade }}",
+                    "rightValue": "spam",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Spam"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 1
+        }
+      },
+      "id": "a1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Route by Grade",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1520, 120]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#sales-leads",
+          "mode": "name"
+        },
+        "text": "=:fire: *HOT LEAD — {{ $json.score }}/100*\n*{{ $json.fullName }}*{{ $json.company ? ' · ' + $json.company : '' }}\n:email: {{ $json.email }}   :telephone_receiver: {{ $json.phone || 'no phone given' }}\n\n*Wants:* {{ $json.serviceLine }}\n*Urgency:* {{ $json.urgency }}   *Budget signal:* {{ $json.budgetSignal }}\n*Read this:* {{ $json.summary }}\n\n*Next step:* {{ $json.nextStep }}\n*Ask them:* {{ $json.questionsText }}\n\n_Auto-reply already sent. Lead ID `{{ $json.leadId }}` · source: {{ $json.source }}_",
+        "otherOptions": {}
+      },
+      "id": "a1b2c3d4-0014-4000-8000-000000000014",
+      "name": "Slack: Hot Lead Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1760, -120],
+      "webhookId": "c0ffee00-slk2-4000-8000-000000000002",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "sms",
+        "operation": "send",
+        "from": "+15550001111",
+        "to": "+15550000000",
+        "message": "=HOT LEAD ({{ $json.score }}/100): {{ $json.fullName }}{{ $json.company ? ' @ ' + $json.company : '' }} - {{ $json.serviceLine }}. Call {{ $json.phone || $json.email }}. {{ $json.summary }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0015-4000-8000-000000000015",
+      "name": "Twilio: Text On-Call Rep",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [1980, -120],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Re: your {{ $json.serviceLine }} enquiry — let's get you sorted",
+        "emailType": "text",
+        "message": "=Hi {{ $json.firstName }},\n\n{{ $json.replyBody }}\n\nIf it's easier, call or text me directly on [YOUR PHONE] — I'll pick up.\n\nBest,\n[YOUR NAME]\n[YOUR TITLE], [YOUR BUSINESS]\n[PHONE] · [WEBSITE]",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1b2c3d4-0016-4000-8000-000000000016",
+      "name": "Gmail: Hot Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2200, -120],
+      "webhookId": "c0ffee00-gml1-4000-8000-000000000001",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Thanks for reaching out about {{ $json.serviceLine }}",
+        "emailType": "text",
+        "message": "=Hi {{ $json.firstName }},\n\n{{ $json.replyBody }}\n\nBest,\n[YOUR NAME]\n[YOUR TITLE], [YOUR BUSINESS]\n[PHONE] · [WEBSITE]",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1b2c3d4-0017-4000-8000-000000000017",
+      "name": "Gmail: Warm Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1760, 140],
+      "webhookId": "c0ffee00-gml2-4000-8000-000000000002",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0018-4000-8000-000000000018",
+      "name": "Spam: Logged Only",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1760, 420]
+    },
+    {
+      "parameters": {
+        "amount": 24,
+        "unit": "hours"
+      },
+      "id": "a1b2c3d4-0019-4000-8000-000000000019",
+      "name": "Wait 24 Hours",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2440, 20],
+      "webhookId": "c0ffee00-wait-4000-8000-000000000001"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 5,
+        "simple": true,
+        "filters": {
+          "q": "=from:{{ $json.email }} newer_than:2d"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0020-4000-8000-000000000020",
+      "name": "Gmail: Search For Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2660, 20],
+      "webhookId": "c0ffee00-gml3-4000-8000-000000000003",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Wait 24 Hours').first().json;\n\n// An empty Gmail search still emits one blank item, so filter on a real message id.\nconst replies = $input.all().filter(i => i.json && (i.json.id || i.json.threadId));\n\nreturn [{\n  json: {\n    ...lead,\n    replyCount: replies.length,\n    hasReplied: replies.length > 0,\n    status: replies.length > 0 ? 'Replied' : 'Nudged - awaiting reply'\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0021-4000-8000-000000000021",
+      "name": "Check Reply Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 20]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-has-replied",
+              "leftValue": "={{ $json.hasReplied }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0022-4000-8000-000000000022",
+      "name": "Did They Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [3100, 20]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "=Following up — {{ $json.serviceLine }}",
+        "emailType": "text",
+        "message": "=Hi {{ $json.firstName }},\n\nJust making sure my last email didn't get buried. You reached out about {{ $json.serviceLine }} and I don't want to leave you hanging.\n\nOne quick question so I can point you the right way: {{ $json.questions[0] || 'what timeline are you working to?' }}\n\nIf the timing has changed or you've gone another direction, no hard feelings — just reply \"not now\" and I'll close it out.\n\nBest,\n[YOUR NAME]\n[YOUR BUSINESS] · [PHONE]",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1b2c3d4-0023-4000-8000-000000000023",
+      "name": "Gmail: Follow-Up Nudge",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [3340, 140],
+      "webhookId": "c0ffee00-gml4-4000-8000-000000000004",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead ID": "={{ $json.leadId }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [
+            "Lead ID"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0024-4000-8000-000000000024",
+      "name": "Sheet: Update Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [3340, -100],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead ID": "={{ $json.leadId }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [
+            "Lead ID"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0025-4000-8000-000000000025",
+      "name": "Sheet: Mark Followed Up",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [3560, 140],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Lead Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond to Form",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Existing Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Lead": {
+      "main": [
+        [
+          {
+            "node": "Flag Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flag Duplicate": {
+      "main": [
+        [
+          {
+            "node": "New & Valid Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New & Valid Lead?": {
+      "main": [
+        [
+          {
+            "node": "AI Qualify Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack: Returning Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Qualify Lead": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Result": {
+      "main": [
+        [
+          {
+            "node": "Log Lead to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Lead to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Route by Grade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Grade": {
+      "main": [
+        [
+          {
+            "node": "Slack: Hot Lead Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Warm Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Spam: Logged Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Hot Lead Alert": {
+      "main": [
+        [
+          {
+            "node": "Twilio: Text On-Call Rep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twilio: Text On-Call Rep": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Hot Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Hot Reply": {
+      "main": [
+        [
+          {
+            "node": "Wait 24 Hours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Warm Reply": {
+      "main": [
+        [
+          {
+            "node": "Wait 24 Hours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 24 Hours": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Search For Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Search For Reply": {
+      "main": [
+        [
+          {
+            "node": "Check Reply Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Reply Status": {
+      "main": [
+        [
+          {
+            "node": "Did They Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Did They Reply?": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Update Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Follow-Up Nudge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Follow-Up Nudge": {
+      "main": [
+        [
+          {
+            "node": "Sheet: Mark Followed Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "sales"
+    },
+    {
+      "name": "smb"
+    }
+  ]
+}
